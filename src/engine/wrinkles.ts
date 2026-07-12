@@ -21,7 +21,7 @@ import {
   viewToWorld,
   worldToView,
 } from './math3d';
-import { regionCylinderAt } from './region';
+import { pointInPolygon, regionCylinderAt } from './region';
 
 /** mulberry32 シード付き乱数 */
 function rng(seed: number): () => number {
@@ -454,13 +454,45 @@ export function generateGuides(
   const joints = anchors.filter((a) => a.kind === 'joint');
   const supports = anchors.filter((a) => a.kind === 'support');
 
+  // 張力ジワは同じ服パーツ(領域)内の固定点ペアのみ。
+  // 左袖口→右袖口のように別パーツを横断する線は生成しない
+  const regionIndexOf = (x: number, y: number): number => {
+    for (let i = 0; i < regions.length; i++) {
+      if (regions[i].pts.length >= 3 && pointInPolygon(regions[i].pts, x, y)) return i;
+    }
+    return -1;
+  };
   for (let i = 0; i < fixed.length; i++) {
     for (let j = i + 1; j < fixed.length; j++) {
+      if (regions.length > 0) {
+        const ri = regionIndexOf(fixed[i].x, fixed[i].y);
+        const rj = regionIndexOf(fixed[j].x, fixed[j].y);
+        if (ri !== rj) continue;
+      }
       tensionWrinkles(fixed[i], fixed[j], material, ctx, out);
     }
   }
   for (const j of joints) compressionWrinkles(j, material, ctx, out);
-  for (const f of fixed) poolingWrinkles(f, material, ctx, out);
+
+  // たまりジワは布が上から溜まる場所(袖口・裾・ベルト上)にだけ発生する。
+  // 服パーツの上側に置かれた固定点(肩の付け根など)には生成しない
+  const poolingOk = (f: Anchor): boolean => {
+    for (const region of regions) {
+      if (region.pts.length < 3 || !pointInPolygon(region.pts, f.x, f.y)) continue;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (const p of region.pts) {
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+      if (maxY - minY < 1) return true;
+      return (f.y - minY) / (maxY - minY) > 0.45;
+    }
+    return true; // 領域なし/領域外は従来通り
+  };
+  for (const f of fixed) {
+    if (poolingOk(f)) poolingWrinkles(f, material, ctx, out);
+  }
   for (const s of supports) drapeWrinkles(s, material, ctx, out);
 
   return out;

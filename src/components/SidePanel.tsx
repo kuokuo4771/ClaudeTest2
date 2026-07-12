@@ -66,9 +66,10 @@ export default function SidePanel(props: Props) {
 
   const activeKind = selected ? selected.kind : defaultKind;
 
+  // 新規配置の種類を常に切り替え、アンカー選択中はそのアンカーの種類も変更する
   const setKind = (k: AnchorKind) => {
+    onDefaultKindChange(k);
     if (selected) onAnchorUpdate(selected.id, { kind: k });
-    else onDefaultKindChange(k);
   };
 
   const setMaterialField = (field: keyof Material, v: number) => {

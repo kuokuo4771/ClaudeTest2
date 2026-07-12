@@ -230,6 +230,9 @@ export default function App() {
           e.preventDefault();
           setOverlayVisible((v) => !v);
           break;
+        case 'Escape':
+          setSelectedId(null);
+          break;
         case 'Delete':
         case 'Backspace':
           setSelectedId((sel) => {
