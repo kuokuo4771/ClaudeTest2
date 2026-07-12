@@ -41,4 +41,6 @@ npm run preview  # ビルド結果のプレビュー
 
 ## デプロイ
 
-`main` ブランチへの push で GitHub Actions が自動ビルドし、GitHub Pages にデプロイされます（リポジトリの Settings → Pages → Source を「GitHub Actions」にしてください）。
+`main` ブランチへの push で GitHub Actions が自動ビルドし、ビルド結果を `gh-pages` ブランチへ公開します。
+
+初回のみ、リポジトリの **Settings → Pages → Source** で「Deploy from a branch」を選び、ブランチに **`gh-pages` / (root)** を指定してください。以降は push のたびに自動更新され、`https://kuokuo4771.github.io/ClaudeTest2/` で公開されます。
