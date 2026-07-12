@@ -33,6 +33,8 @@ export interface GuideSettings {
   show: Record<GuideType, boolean>;
   opacity: number; // 0..1
   density: Density;
+  /** 服の領域(または画像の透明部分)でガイドをクリップする */
+  clip: boolean;
 }
 
 export interface GuideLine {
@@ -41,6 +43,14 @@ export interface GuideLine {
   pts: { x: number; y: number }[];
   width: number;
   alpha: number;
+  /** 各点の線幅(入り抜きテーパー)。省略時は width の均一線 */
+  widths?: number[];
+}
+
+/** 服の領域(画像座標系の多角形) */
+export interface Region {
+  id: string;
+  pts: { x: number; y: number }[];
 }
 
 export const GUIDE_COLORS: Record<GuideType, string> = {

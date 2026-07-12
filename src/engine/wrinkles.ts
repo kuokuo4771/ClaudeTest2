@@ -5,6 +5,7 @@ import type {
   GuideLine,
   GuideType,
   Material,
+  Region,
 } from '../types';
 import {
   V3,
@@ -20,6 +21,7 @@ import {
   viewToWorld,
   worldToView,
 } from './math3d';
+import { regionCylinderAt } from './region';
 
 /** mulberry32 シード付き乱数 */
 function rng(seed: number): () => number {
@@ -57,6 +59,7 @@ interface Ctx {
   u: number; // 画像サイズに対する基準単位
   camDir: V3; // ワールド空間でカメラへ向かう方向
   densityMul: number;
+  regions: Region[];
 }
 
 /** アンカーの2D座標+深度 → ワールド座標(カメラ角度で逆投影) */
@@ -69,23 +72,49 @@ function anchorWorld(a: Anchor, ctx: Ctx): V3 {
   return viewToWorld(view, ctx.cam);
 }
 
+/** 入り抜きテーパーの幅配列(端が細く中央が太い、筆致風) */
+function taperWidths(n: number, baseW: number, bias = 0.5): number[] {
+  const ws: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0.5 : i / (n - 1);
+    // biasで太さのピーク位置をずらせる(0.5=中央)
+    const s =
+      t <= bias
+        ? Math.sin((Math.PI / 2) * (t / bias))
+        : Math.sin((Math.PI / 2) * ((1 - t) / (1 - bias)));
+    ws.push(baseW * (0.08 + 0.92 * Math.pow(Math.max(0, s), 0.8)));
+  }
+  return ws;
+}
+
 /**
  * 3Dポリラインを投影し、可視セグメントごとに分割して出力する。
  * normals があれば法線とカメラ方向の内積で表裏判定し、裏面をクリップする。
  */
 function projectPolyline(
   pts: V3[],
+  widths: number[] | null,
   normals: (V3 | null)[] | null,
   type: GuideType,
-  width: number,
+  baseWidth: number,
   alpha: number,
   ctx: Ctx,
   out: GuideLine[],
 ): void {
-  let current: { x: number; y: number }[] = [];
+  let curPts: { x: number; y: number }[] = [];
+  let curW: number[] = [];
   const flush = () => {
-    if (current.length >= 2) out.push({ type, pts: current, width, alpha });
-    current = [];
+    if (curPts.length >= 2) {
+      out.push({
+        type,
+        pts: curPts,
+        width: baseWidth,
+        alpha,
+        widths: widths ? curW : undefined,
+      });
+    }
+    curPts = [];
+    curW = [];
   };
   for (let i = 0; i < pts.length; i++) {
     const n = normals ? normals[i] : null;
@@ -95,30 +124,43 @@ function projectPolyline(
       continue;
     }
     const v = worldToView(pts[i], ctx.cam);
-    current.push({ x: v.x + ctx.cx, y: v.y + ctx.cy });
+    curPts.push({ x: v.x + ctx.cx, y: v.y + ctx.cy });
+    if (widths) curW.push(widths[i]);
   }
   flush();
 }
 
 /**
- * 体の円筒面ヘルパー。
- * アンカーのワールド位置を「円筒表面上の点」とみなし、鉛直軸の円筒を仮定する。
- * アンカーの向き(法線)は、深度0面より手前ならカメラ寄り、という近似で
- * 配置時カメラから見た正面方向(ワールドz+をアンカー側に回した向き)とする。
+ * 体の円筒面ヘルパー。鉛直軸の円筒を仮定する。
+ * 服の領域が指定されていれば、その高さでの服の幅に半径・中心をフィットさせる。
  */
 interface Cylinder {
-  axisX: number; // 軸のワールドx
-  axisZ: number; // 軸のワールドz
+  axisX: number;
+  axisZ: number;
   r: number;
   phi0: number; // アンカーが乗っている周方向角
 }
 
-function makeCylinder(aw: V3, r: number): Cylinder {
-  // アンカーは円筒の正面(ワールド+z側)に乗っていると仮定
-  return { axisX: aw.x, axisZ: aw.z - r, r, phi0: 0 };
+/** アンカーに合わせた円筒。regionsがあれば服の幅から半径と中心を推定 */
+function fitCylinder(a: Anchor, aw: V3, fallbackR: number, ctx: Ctx): Cylinder {
+  const span = regionCylinderAt(ctx.regions, a.x, a.y);
+  let r = fallbackR;
+  let phi0 = 0;
+  if (span) {
+    r = Math.min(Math.max(span.r * 0.95, ctx.u * 8), ctx.u * 250);
+    // アンカーが服の中心からずれている分を周方向角に変換
+    const off = (a.x - span.cx) / r;
+    phi0 = Math.asin(Math.min(0.95, Math.max(-0.95, off)));
+  }
+  return {
+    axisX: aw.x - r * Math.sin(phi0),
+    axisZ: aw.z - r * Math.cos(phi0),
+    r,
+    phi0,
+  };
 }
 
-/** 円筒表面上の点: phi=0が正面(+z)、dx=周方向オフセット角、y=高さ */
+/** 円筒表面上の点: phi=0が正面(+z) */
 function cylPoint(c: Cylinder, phi: number, y: number): { p: V3; n: V3 } {
   const p: V3 = {
     x: c.axisX + c.r * Math.sin(phi),
@@ -142,7 +184,6 @@ function tensionWrinkles(
   const d3 = len(sub(B, A));
   if (d3 < ctx.u * 10) return;
 
-  // シワ本数: 距離と硬さで決定
   const spacingBase = (50 * material.stiffness + 20) * ctx.u;
   let n = Math.floor(d3 / spacingBase);
   n = Math.max(1, Math.min(14, Math.round(n * ctx.densityMul)));
@@ -154,19 +195,17 @@ function tensionWrinkles(
   if (projLen < d3 * 0.18) return;
 
   const dir = norm(sub(B, A));
-  // 中心線に対する垂直方向(できるだけ画面平行に)
   let perp = norm(cross(dir, ctx.camDir));
   if (len(perp) < 1e-6) perp = norm(cross(dir, { x: 0, y: 1, z: 0 }));
 
   const rand = rng(hashId(a.id + b.id) ^ 0x51a);
-  const spread = ctx.u * (10 + material.thickness * 14);
-  const width = 1 + material.thickness * 2.5;
+  const spread = ctx.u * (9 + material.thickness * 12);
+  const baseW = ctx.u * (1.6 + material.thickness * 3);
   const samples = 14;
   const prevProj: { x: number; y: number }[] = [];
 
   for (let i = 0; i < n; i++) {
     const off = n === 1 ? 0 : (i / (n - 1) - 0.5) * 2; // -1..1
-    // 端の線ほど短く(楕円包絡)
     const lenScale = Math.sqrt(Math.max(0.15, 1 - off * off * 0.8));
     const t0 = 0.5 - lenScale * 0.42;
     const t1 = 0.5 + lenScale * 0.42;
@@ -178,22 +217,49 @@ function tensionWrinkles(
     const pts: V3[] = [];
     for (let s = 0; s <= samples; s++) {
       const t = t0 + lenJitter + ((t1 - t0) * s) / samples;
-      const bell = Math.sin(((t - t0 - lenJitter) / (t1 - t0)) * Math.PI); // 両端0
+      const bell = Math.sin(((t - t0 - lenJitter) / (t1 - t0)) * Math.PI);
       let p = lerp(A, B, t);
-      // 端を完全には収束させない(本数が少ないとき輪に見えるのを防ぐ)
       p = add(p, scale(perp, off * spread * (0.3 + 0.7 * bell)));
-      // 揺らぎ + 重力たわみ
       p = add(p, scale(perp, Math.sin(t * 9 + jitterPhase) * jitterAmp * bell));
       p.y += sag * bell;
       pts.push(p);
     }
-    // 投影後の隣接線間隔が詰まりすぎたら省略(密集防止)
     const mid = worldToView(pts[Math.floor(samples / 2)], ctx.cam);
     const prev = prevProj[prevProj.length - 1];
     if (prev && Math.hypot(mid.x - prev.x, mid.y - prev.y) < 3) continue;
     prevProj.push({ x: mid.x, y: mid.y });
 
-    projectPolyline(pts, null, 'tension', width, 0.9 - Math.abs(off) * 0.35, ctx, out);
+    // 入り抜き: 引っ張り元(A側)がやや太い
+    const widths = taperWidths(pts.length, baseW * (1 - Math.abs(off) * 0.35), 0.38);
+    const alpha = 0.92 - Math.abs(off) * 0.35;
+    projectPolyline(pts, widths, null, 'tension', baseW, alpha, ctx, out);
+
+    // Y字分岐: 柔らかい布ほど発生しやすい
+    if (rand() < (1 - material.stiffness) * 0.55 && lenScale > 0.5) {
+      const bt = 0.3 + rand() * 0.4;
+      const k = Math.round(bt * samples);
+      const start = pts[k];
+      const branchDir = norm(
+        add(scale(dir, 0.8), scale(perp, (rand() > 0.5 ? 1 : -1) * (0.4 + rand() * 0.3))),
+      );
+      const bl = d3 * (0.08 + rand() * 0.07);
+      const bPts: V3[] = [];
+      const bSamples = 6;
+      for (let s = 0; s <= bSamples; s++) {
+        const t = s / bSamples;
+        bPts.push(add(start, scale(branchDir, bl * t)));
+      }
+      projectPolyline(
+        bPts,
+        taperWidths(bPts.length, baseW * 0.6, 0.25),
+        null,
+        'tension',
+        baseW * 0.6,
+        alpha * 0.8,
+        ctx,
+        out,
+      );
+    }
   }
 }
 
@@ -211,31 +277,57 @@ function compressionWrinkles(
   let n = Math.ceil(bend / (60 * material.stiffness + 30));
   n = Math.max(1, Math.min(12, Math.round(n * ctx.densityMul)));
 
-  const r = ctx.u * (35 + material.thickness * 35);
-  const cyl = makeCylinder(J, r);
+  const fallbackR = ctx.u * (30 + material.thickness * 25);
+  const cyl = fitCylinder(j, J, fallbackR, ctx);
   const rand = rng(hashId(j.id) ^ 0xc0);
-  const spacing = ctx.u * (7 + material.thickness * 8);
-  const width = 1.2 + material.thickness * 2.8;
-  const maxPhi = 1.15 + (bend / 180) * 0.45; // 曲げが深いほど回り込む
+  const spacing = Math.min(ctx.u * (7 + material.thickness * 8), (cyl.r * 1.6) / Math.max(2, n));
+  const baseW = ctx.u * (1.8 + material.thickness * 3.2);
+  const maxPhi = 1.1 + (bend / 180) * 0.4;
   const samples = 20;
 
   for (let i = 0; i < n; i++) {
     const yOff = (i - (n - 1) / 2) * spacing;
-    const phiJitter = (rand() - 0.5) * 0.3;
-    const arcScale = 1 - Math.abs(i - (n - 1) / 2) / (n + 1);
-    // 曲げの内側の折れ線: 端がやや下がる弧
+    const phiJitter = (rand() - 0.5) * 0.25;
+    const centerIdx = Math.abs(i - (n - 1) / 2);
+    const arcScale = 1 - centerIdx / (n + 1);
     const bow = ctx.u * (2 + (bend / 180) * 6) * (1 - material.stiffness * 0.5);
 
     const pts: V3[] = [];
     const normals: V3[] = [];
     for (let s = 0; s <= samples; s++) {
-      const phi = (s / samples - 0.5) * 2 * maxPhi * (0.55 + arcScale * 0.45) + phiJitter;
+      const rel = (s / samples - 0.5) * 2; // -1..1
+      const phi = cyl.phi0 + rel * maxPhi * (0.55 + arcScale * 0.45) + phiJitter;
       const { p, n: nn } = cylPoint(cyl, phi, J.y + yOff);
-      p.y += bow * phi * phi;
+      p.y += bow * (phi - cyl.phi0) * (phi - cyl.phi0);
       pts.push(p);
       normals.push(nn);
     }
-    projectPolyline(pts, normals, 'compression', width, 0.85, ctx, out);
+    // 中央の折り目ほど深く=太く。端は浅く細い
+    const widths = taperWidths(pts.length, baseW * (0.65 + arcScale * 0.5), 0.5);
+    projectPolyline(pts, widths, normals, 'compression', baseW, 0.88, ctx, out);
+
+    // 深い曲げでは中央の折り目に短いエコー線を添える
+    if (bend > 100 && centerIdx < 1 && rand() < 0.8) {
+      const ePts: V3[] = [];
+      const eNorm: V3[] = [];
+      for (let s = 0; s <= 10; s++) {
+        const rel = (s / 10 - 0.5) * 2;
+        const phi = cyl.phi0 + rel * maxPhi * 0.3 + phiJitter;
+        const { p, n: nn } = cylPoint(cyl, phi, J.y + yOff + spacing * 0.4);
+        ePts.push(p);
+        eNorm.push(nn);
+      }
+      projectPolyline(
+        ePts,
+        taperWidths(ePts.length, baseW * 0.5, 0.5),
+        eNorm,
+        'compression',
+        baseW * 0.5,
+        0.6,
+        ctx,
+        out,
+      );
+    }
   }
 }
 
@@ -251,13 +343,13 @@ function poolingWrinkles(
   let n = Math.ceil(excess / ((30 + material.weight * 20) * ctx.u));
   n = Math.max(1, Math.min(8, Math.round(n * ctx.densityMul) + 1));
 
-  const r = ctx.u * (40 + material.thickness * 30);
-  const cyl = makeCylinder(F, r);
+  const fallbackR = ctx.u * (35 + material.thickness * 25);
+  const cyl = fitCylinder(f, F, fallbackR, ctx);
   const rand = rng(hashId(f.id) ^ 0x9001);
   const spacing = ctx.u * (9 + material.weight * 7);
   const amp = ctx.u * (3 + material.weight * 5);
-  const halfPhi = 0.9;
-  const width = 1 + material.thickness * 2.2;
+  const halfPhi = 0.85;
+  const baseW = ctx.u * (1.5 + material.thickness * 2.6);
   const samples = 26;
   const waveFreq = 2.5 + (1 - material.stiffness) * 2;
 
@@ -267,9 +359,9 @@ function poolingWrinkles(
     const pts: V3[] = [];
     const normals: V3[] = [];
     for (let s = 0; s <= samples; s++) {
-      const phi = (s / samples - 0.5) * 2 * halfPhi;
-      // 硬い布は三角波寄り、柔らかい布は正弦波寄り
-      const arg = phi * waveFreq * Math.PI + phase + i * 0.8;
+      const rel = (s / samples - 0.5) * 2;
+      const phi = cyl.phi0 + rel * halfPhi;
+      const arg = rel * waveFreq * Math.PI + phase + i * 0.8;
       const sine = Math.sin(arg);
       const tri = (2 / Math.PI) * Math.asin(Math.sin(arg));
       const wave = sine * (1 - material.stiffness) + tri * material.stiffness;
@@ -277,7 +369,8 @@ function poolingWrinkles(
       pts.push(p);
       normals.push(nn);
     }
-    projectPolyline(pts, normals, 'pooling', width, 0.8, ctx, out);
+    const widths = taperWidths(pts.length, baseW, 0.5);
+    projectPolyline(pts, widths, normals, 'pooling', baseW, 0.82, ctx, out);
   }
 }
 
@@ -293,39 +386,50 @@ function drapeWrinkles(
   let count = 3 + Math.round(material.weight * 2);
   count = Math.max(2, Math.min(7, Math.round(count * ctx.densityMul)));
 
-  const r = ctx.u * (45 + material.thickness * 30);
-  const cyl = makeCylinder(S, r);
+  const fallbackR = ctx.u * (40 + material.thickness * 25);
+  const cyl = fitCylinder(s, S, fallbackR, ctx);
   const length = ctx.u * (80 + material.weight * 110);
-  const width = 1 + material.thickness * 2.5;
+  const baseW = ctx.u * (1.5 + material.thickness * 3);
   const samples = 18;
 
   for (let k = 0; k < count; k++) {
-    const spreadDir = (k / (count - 1) - 0.5) * 2; // -1..1
-    const spreadRand = spreadDir + (rand() - 0.5) * 0.35; // 左右非対称
-    const maxPhi = spreadRand * (0.55 + material.weight * 0.25);
+    const spreadDir = count === 1 ? 0 : (k / (count - 1) - 0.5) * 2;
+    const spreadRand = spreadDir + (rand() - 0.5) * 0.35;
+    const maxPhi = spreadRand * (0.5 + material.weight * 0.25);
     const lenK = length * (0.7 + rand() * 0.45);
-    // weightが高いほど急角度で垂れる = 早く垂直になる
     const straighten = 1.5 + material.weight * 2;
 
     const pts: V3[] = [];
     const normals: V3[] = [];
     for (let t = 0; t <= samples; t++) {
       const tt = t / samples;
-      // カテナリー近似: 最初は放射状に広がり、次第に垂直へ
-      const lateral = maxPhi * (1 - Math.exp(-tt * straighten)) / (1 - Math.exp(-straighten));
-      const phi = lateral;
+      const lateral =
+        (maxPhi * (1 - Math.exp(-tt * straighten))) / (1 - Math.exp(-straighten));
+      const phi = cyl.phi0 + lateral;
       const yDrop = lenK * (tt * 0.3 + tt * tt * 0.7);
       const { p, n: nn } = cylPoint(cyl, phi, S.y + yDrop);
       pts.push(p);
       normals.push(nn);
     }
-    projectPolyline(pts, normals, 'drape', width, 0.8 - Math.abs(spreadDir) * 0.2, ctx, out);
+    // 落ちジワは上(支持点側)が太く、裾に向かって抜ける
+    const widths = taperWidths(pts.length, baseW * (1 - Math.abs(spreadDir) * 0.25), 0.3);
+    projectPolyline(
+      pts,
+      widths,
+      normals,
+      'drape',
+      baseW,
+      0.82 - Math.abs(spreadDir) * 0.2,
+      ctx,
+      out,
+    );
   }
 }
 
 /* ============ エントリポイント ============ */
 export function generateGuides(
   anchors: Anchor[],
+  regions: Region[],
   material: Material,
   cam: CameraAngle,
   imgW: number,
@@ -342,6 +446,7 @@ export function generateGuides(
     u: Math.max(imgW, imgH) / 700,
     camDir: cameraDirWorld(cam),
     densityMul: DENSITY_MUL[density],
+    regions,
   };
   const out: GuideLine[] = [];
 
@@ -349,17 +454,13 @@ export function generateGuides(
   const joints = anchors.filter((a) => a.kind === 'joint');
   const supports = anchors.filter((a) => a.kind === 'support');
 
-  // 張力ジワ: 固定点の全ペア
   for (let i = 0; i < fixed.length; i++) {
     for (let j = i + 1; j < fixed.length; j++) {
       tensionWrinkles(fixed[i], fixed[j], material, ctx, out);
     }
   }
-  // 圧縮ジワ: 各関節点
   for (const j of joints) compressionWrinkles(j, material, ctx, out);
-  // たまりジワ: 各固定点の上
   for (const f of fixed) poolingWrinkles(f, material, ctx, out);
-  // 落ちジワ: 各支持点
   for (const s of supports) drapeWrinkles(s, material, ctx, out);
 
   return out;

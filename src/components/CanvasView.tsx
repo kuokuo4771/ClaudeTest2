@@ -4,9 +4,9 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { Anchor, AnchorKind, GuideLine, GuideSettings } from '../types';
-import { drawGuides } from '../engine/draw';
+import type { Anchor, AnchorKind, Region } from '../types';
 import { PART_LABELS } from '../engine/labels';
+import { pointInPolygon } from '../engine/region';
 
 const KIND_COLORS: Record<AnchorKind, string> = {
   fixed: '#e53935',
@@ -14,19 +14,23 @@ const KIND_COLORS: Record<AnchorKind, string> = {
   support: '#43a047',
 };
 
+export type CanvasMode = 'anchor' | 'select' | 'region';
+
 interface Props {
   image: HTMLImageElement | null;
   anchors: Anchor[];
-  guides: GuideLine[];
-  settings: GuideSettings;
+  regions: Region[];
+  guideLayer: HTMLCanvasElement | null;
   overlayVisible: boolean;
-  mode: 'anchor' | 'select';
+  mode: CanvasMode;
   selectedId: string | null;
   onAddAnchor: (x: number, y: number) => void;
   onSelect: (id: string | null) => void;
   onDragStart: (id: string) => void;
   onDragMove: (id: string, x: number, y: number) => void;
   onDelete: (id: string) => void;
+  onAddRegion: (pts: { x: number; y: number }[]) => void;
+  onDeleteRegion: (id: string) => void;
   onDropFile: (file: File) => void;
 }
 
@@ -40,8 +44,8 @@ export default function CanvasView(props: Props) {
   const {
     image,
     anchors,
-    guides,
-    settings,
+    regions,
+    guideLayer,
     overlayVisible,
     mode,
     selectedId,
@@ -50,6 +54,8 @@ export default function CanvasView(props: Props) {
     onDragStart,
     onDragMove,
     onDelete,
+    onAddRegion,
+    onDeleteRegion,
     onDropFile,
   } = props;
 
@@ -57,6 +63,8 @@ export default function CanvasView(props: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [transform, setTransform] = useState<Transform>({ scale: 1, tx: 0, ty: 0 });
   const [spaceHeld, setSpaceHeld] = useState(false);
+  const [draft, setDraft] = useState<{ x: number; y: number }[]>([]);
+  const [hoverPt, setHoverPt] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<
     | { type: 'pan'; startX: number; startY: number; startTx: number; startTy: number }
     | { type: 'anchor'; id: string }
@@ -93,6 +101,21 @@ export default function CanvasView(props: Props) {
     [anchors, transform.scale],
   );
 
+  const closeDraft = useCallback(() => {
+    setDraft((d) => {
+      if (d.length >= 3) onAddRegion(d);
+      return [];
+    });
+  }, [onAddRegion]);
+
+  // モードが変わったら下書きを破棄
+  useEffect(() => {
+    if (mode !== 'region') {
+      setDraft([]);
+      setHoverPt(null);
+    }
+  }, [mode]);
+
   // 画像読み込み時にフィット
   useEffect(() => {
     if (!image || !containerRef.current) return;
@@ -105,14 +128,18 @@ export default function CanvasView(props: Props) {
     });
   }, [image]);
 
-  // Spaceキー監視
+  // Space / Enter / Escape キー監視
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'BUTTON') return;
       if (e.code === 'Space') {
-        const t = e.target as HTMLElement;
-        if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'BUTTON') return;
         e.preventDefault();
         setSpaceHeld(true);
+      } else if (e.key === 'Enter' && mode === 'region') {
+        closeDraft();
+      } else if (e.key === 'Escape' && mode === 'region') {
+        setDraft([]);
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -124,7 +151,7 @@ export default function CanvasView(props: Props) {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, []);
+  }, [mode, closeDraft]);
 
   // ホイールズーム(non-passiveで登録)
   useEffect(() => {
@@ -165,6 +192,17 @@ export default function CanvasView(props: Props) {
     }
     if (!image) return;
     const p = toImage(e.clientX, e.clientY);
+
+    if (mode === 'region') {
+      // 始点の近くをクリックしたら閉じる
+      if (draft.length >= 3 && Math.hypot(p.x - draft[0].x, p.y - draft[0].y) < 12 / transform.scale) {
+        closeDraft();
+      } else {
+        setDraft((d) => [...d, p]);
+      }
+      return;
+    }
+
     const hit = hitTest(p.x, p.y);
     if (mode === 'select') {
       onSelect(hit ? hit.id : null);
@@ -173,7 +211,6 @@ export default function CanvasView(props: Props) {
         dragRef.current = { type: 'anchor', id: hit.id };
       }
     } else {
-      // 配置モード: 既存アンカーの上ならドラッグ、それ以外は新規配置
       if (hit) {
         onSelect(hit.id);
         onDragStart(hit.id);
@@ -190,6 +227,9 @@ export default function CanvasView(props: Props) {
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
+    if (mode === 'region' && draft.length > 0) {
+      setHoverPt(toImage(e.clientX, e.clientY));
+    }
     const drag = dragRef.current;
     if (!drag) return;
     if (drag.type === 'pan') {
@@ -208,10 +248,25 @@ export default function CanvasView(props: Props) {
     dragRef.current = null;
   };
 
+  const onDoubleClick = () => {
+    if (mode === 'region') closeDraft();
+  };
+
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     if (!image) return;
     const p = toImage(e.clientX, e.clientY);
+    if (mode === 'region') {
+      if (draft.length > 0) {
+        setDraft((d) => d.slice(0, -1));
+      } else {
+        const hitRegion = regions.find(
+          (r) => r.pts.length >= 3 && pointInPolygon(r.pts, p.x, p.y),
+        );
+        if (hitRegion) onDeleteRegion(hitRegion.id);
+      }
+      return;
+    }
     const hit = hitTest(p.x, p.y);
     if (hit) onDelete(hit.id);
   };
@@ -239,12 +294,48 @@ export default function CanvasView(props: Props) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(image, 0, 0);
 
-    if (overlayVisible) {
-      drawGuides(ctx, guides, settings);
+    if (overlayVisible && guideLayer) {
+      ctx.drawImage(guideLayer, 0, 0);
+    }
+
+    const s = transform.scale;
+
+    // 服の領域
+    for (const r of regions) {
+      if (r.pts.length < 2) continue;
+      ctx.beginPath();
+      ctx.moveTo(r.pts[0].x, r.pts[0].y);
+      for (let i = 1; i < r.pts.length; i++) ctx.lineTo(r.pts[i].x, r.pts[i].y);
+      ctx.closePath();
+      if (mode === 'region') {
+        ctx.fillStyle = 'rgba(255, 213, 79, 0.08)';
+        ctx.fill();
+      }
+      ctx.strokeStyle = mode === 'region' ? '#ffd54f' : 'rgba(255, 213, 79, 0.45)';
+      ctx.lineWidth = 1.5 / s;
+      ctx.setLineDash([6 / s, 4 / s]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // 領域の下書き
+    if (mode === 'region' && draft.length > 0) {
+      ctx.beginPath();
+      ctx.moveTo(draft[0].x, draft[0].y);
+      for (let i = 1; i < draft.length; i++) ctx.lineTo(draft[i].x, draft[i].y);
+      if (hoverPt) ctx.lineTo(hoverPt.x, hoverPt.y);
+      ctx.strokeStyle = '#ffd54f';
+      ctx.lineWidth = 1.5 / s;
+      ctx.stroke();
+      for (let i = 0; i < draft.length; i++) {
+        ctx.beginPath();
+        ctx.arc(draft[i].x, draft[i].y, (i === 0 ? 5 : 3.5) / s, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? '#fff176' : '#ffd54f';
+        ctx.fill();
+      }
     }
 
     // アンカーマーカー(画面上で一定サイズ)
-    const s = transform.scale;
     for (const a of anchors) {
       const r = (a.id === selectedId ? 8 : 6) / s;
       ctx.beginPath();
@@ -266,7 +357,18 @@ export default function CanvasView(props: Props) {
       }
     }
     ctx.restore();
-  }, [image, anchors, guides, settings, overlayVisible, selectedId, transform]);
+  }, [
+    image,
+    anchors,
+    regions,
+    guideLayer,
+    overlayVisible,
+    selectedId,
+    transform,
+    mode,
+    draft,
+    hoverPt,
+  ]);
 
   // コンテナリサイズで再描画
   const [, setResizeTick] = useState(0);
@@ -286,9 +388,16 @@ export default function CanvasView(props: Props) {
 
   const cursor = spaceHeld
     ? 'grab'
-    : mode === 'anchor'
-      ? 'crosshair'
-      : 'default';
+    : mode === 'select'
+      ? 'default'
+      : 'crosshair';
+
+  const modeLabel =
+    mode === 'anchor'
+      ? '📍 アンカー配置 (A)'
+      : mode === 'select'
+        ? '🖱️ 選択/移動 (V)'
+        : '🧥 服の領域 (R)';
 
   return (
     <div
@@ -303,6 +412,7 @@ export default function CanvasView(props: Props) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
       />
       {!image && (
@@ -317,7 +427,11 @@ export default function CanvasView(props: Props) {
       )}
       {image && (
         <div className="mode-indicator">
-          モード: <b>{mode === 'anchor' ? '📍 アンカー配置 (A)' : '🖱️ 選択/移動 (V)'}</b>
+          モード: <b>{modeLabel}</b>
+          {mode === 'region' &&
+            (draft.length > 0
+              ? ' ｜ クリックで頂点追加、始点クリック/Enterで確定、Escで取消'
+              : ' ｜ 服の輪郭をクリックで囲む。右クリックで領域削除')}
           {!overlayVisible && ' ｜ ガイド非表示 (Tab)'}
         </div>
       )}

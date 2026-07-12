@@ -1,8 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { viteSingleFile } from 'vite-plugin-singlefile';
 
-// base './' so the built site works on GitHub Pages subpaths and file://
+// singlefile: JS/CSSをすべてindex.htmlにインライン化。
+// 生成されたdist/index.htmlは単体で動くため、ダウンロードして
+// ダブルクリックするだけで起動できる(サーバー・ターミナル不要)。
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), viteSingleFile()],
   base: './',
 });

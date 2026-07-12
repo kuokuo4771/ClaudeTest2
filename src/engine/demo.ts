@@ -7,9 +7,7 @@ export function createDemoImage(): Promise<HTMLImageElement> {
   c.height = h;
   const ctx = c.getContext('2d')!;
 
-  ctx.fillStyle = '#8d8d94';
-  ctx.fillRect(0, 0, w, h);
-
+  // 背景は透過のまま(キャラ形状の自動クリップを体験できる)
   ctx.fillStyle = '#b9b9c2';
   // 頭
   ctx.beginPath();
@@ -48,7 +46,7 @@ export function createDemoImage(): Promise<HTMLImageElement> {
   ctx.lineTo(455, 900);
   ctx.stroke();
 
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
   ctx.font = '22px sans-serif';
   ctx.fillText('DEMO — 自分のレンダー画像を読み込んでください', 130, 970);
 

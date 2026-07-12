@@ -24,6 +24,10 @@ interface Props {
   settings: GuideSettings;
   onSettingsChange: (s: GuideSettings) => void;
   anchorCount: number;
+  regionCount: number;
+  onClearRegions: () => void;
+  onEnterRegionMode: () => void;
+  alphaMaskAvailable: boolean;
 }
 
 const KIND_NAMES: { kind: AnchorKind; label: string; cls: string }[] = [
@@ -54,6 +58,10 @@ export default function SidePanel(props: Props) {
     settings,
     onSettingsChange,
     anchorCount,
+    regionCount,
+    onClearRegions,
+    onEnterRegionMode,
+    alphaMaskAvailable,
   } = props;
 
   const activeKind = selected ? selected.kind : defaultKind;
@@ -229,6 +237,40 @@ export default function SidePanel(props: Props) {
         )}
       </div>
 
+      {/* 服の領域 */}
+      <div className="section">
+        <h2>
+          🧥 服の領域{' '}
+          <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>({regionCount})</span>
+        </h2>
+        <div className="hint" style={{ marginBottom: 8 }}>
+          服の輪郭を多角形で囲むと、シワガイドがその中だけに表示され、
+          回り込みの丸みも服の幅に合わせて計算されます。
+          {alphaMaskAvailable && regionCount === 0 && (
+            <>
+              <br />
+              ※この画像は透過背景なので、未指定でもキャラ形状で自動クリップされます。
+            </>
+          )}
+        </div>
+        <div className="anchor-actions" style={{ marginTop: 0 }}>
+          <button onClick={onEnterRegionMode}>✏️ 領域を描く (R)</button>
+          <button onClick={onClearRegions} disabled={regionCount === 0}>
+            クリア
+          </button>
+        </div>
+        <label
+          style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 12 }}
+        >
+          <input
+            type="checkbox"
+            checked={settings.clip}
+            onChange={(e) => onSettingsChange({ ...settings, clip: e.target.checked })}
+          />
+          領域/透過部分でガイドをクリップ
+        </label>
+      </div>
+
       {/* ガイド表示 */}
       <div className="section">
         <h2>🎨 ガイド表示</h2>
@@ -282,6 +324,8 @@ export default function SidePanel(props: Props) {
           <kbd>A</kbd> アンカー配置モード
           <br />
           <kbd>V</kbd> 選択/移動モード
+          <br />
+          <kbd>R</kbd> 服の領域モード（<kbd>Enter</kbd>確定 / <kbd>Esc</kbd>取消）
           <br />
           <kbd>Tab</kbd> ガイド表示切替
           <br />
