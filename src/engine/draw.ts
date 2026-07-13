@@ -1,15 +1,16 @@
 import { GUIDE_COLORS, GuideLine, GuideSettings, Region } from '../types';
 
-/** 入り抜きテーパー付きリボンを塗りで描画する */
-function fillRibbon(
-  ctx: CanvasRenderingContext2D,
-  pts: { x: number; y: number }[],
-  widths: number[],
-): void {
+/** ベース画像の色を画像座標で引くサンプラー */
+export type ColorSampler = (x: number, y: number) => [number, number, number, number] | null;
+
+const D2R = Math.PI / 180;
+
+type Pt = { x: number; y: number };
+
+/** 各点の単位法線(接線を90°回転)を求める */
+function pathNormals(pts: Pt[]): Pt[] {
   const n = pts.length;
-  if (n < 2) return;
-  const left: { x: number; y: number }[] = [];
-  const right: { x: number; y: number }[] = [];
+  const out: Pt[] = [];
   for (let i = 0; i < n; i++) {
     const p0 = pts[Math.max(0, i - 1)];
     const p1 = pts[Math.min(n - 1, i + 1)];
@@ -18,17 +19,80 @@ function fillRibbon(
     const tl = Math.hypot(tx, ty) || 1;
     tx /= tl;
     ty /= tl;
-    const w = Math.max(0.1, widths[i]) / 2;
-    // 法線 = 接線を90°回転
-    left.push({ x: pts[i].x - ty * w, y: pts[i].y + tx * w });
-    right.push({ x: pts[i].x + ty * w, y: pts[i].y - tx * w });
+    out.push({ x: -ty, y: tx });
   }
+  return out;
+}
+
+/** 入り抜きテーパー付きリボンを塗りで描画する */
+function fillRibbon(ctx: CanvasRenderingContext2D, pts: Pt[], widths: number[]): void {
+  const n = pts.length;
+  if (n < 2) return;
+  const normals = pathNormals(pts);
   ctx.beginPath();
-  ctx.moveTo(left[0].x, left[0].y);
-  for (let i = 1; i < n; i++) ctx.lineTo(left[i].x, left[i].y);
-  for (let i = n - 1; i >= 0; i--) ctx.lineTo(right[i].x, right[i].y);
+  for (let i = 0; i < n; i++) {
+    const w = Math.max(0.1, widths[i]) / 2;
+    const x = pts[i].x + normals[i].x * w;
+    const y = pts[i].y + normals[i].y * w;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    const w = Math.max(0.1, widths[i]) / 2;
+    ctx.lineTo(pts[i].x - normals[i].x * w, pts[i].y - normals[i].y * w);
+  }
   ctx.closePath();
   ctx.fill();
+}
+
+/** シワ線の片側に付くセル塗り風の影シェイプ */
+function fillShadow(
+  ctx: CanvasRenderingContext2D,
+  g: GuideLine,
+  side: 1 | -1,
+): void {
+  const pts = g.pts;
+  const n = pts.length;
+  if (n < 3) return;
+  const normals = pathNormals(pts);
+  const wmax = g.widths ? Math.max(...g.widths) : g.width;
+  const spread = Math.max(wmax * 2.6, 4);
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const w = (g.widths ? g.widths[i] : g.width) * 0.25;
+    const x = pts[i].x + normals[i].x * w * side;
+    const y = pts[i].y + normals[i].y * w * side;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    const t = n === 1 ? 0 : i / (n - 1);
+    const bell = Math.pow(Math.sin(Math.PI * t), 0.75);
+    const d = (g.widths ? g.widths[i] : g.width) * 0.25 + spread * bell;
+    ctx.lineTo(pts[i].x + normals[i].x * d * side, pts[i].y + normals[i].y * d * side);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+function sampleMid(g: GuideLine, sampler: ColorSampler | null) {
+  if (!sampler) return null;
+  const m = g.pts[Math.floor(g.pts.length / 2)];
+  const s = sampler(m.x, m.y);
+  if (!s || s[3] < 40) return null;
+  return s;
+}
+
+/** 仕上げ用: ベース色から線の色(かなり暗く、少し青寄せ) */
+function lineColorFrom(s: [number, number, number, number] | null): string {
+  if (!s) return 'rgb(70, 66, 80)';
+  return `rgb(${(s[0] * 0.3) | 0}, ${(s[1] * 0.3) | 0}, ${(s[2] * 0.38) | 0})`;
+}
+
+/** 仕上げ用: ベース色から影の色(セル塗りの1段影、青寄せ) */
+function shadowColorFrom(s: [number, number, number, number] | null): string {
+  if (!s) return 'rgb(105, 103, 125)';
+  return `rgb(${(s[0] * 0.62) | 0}, ${(s[1] * 0.64) | 0}, ${(s[2] * 0.8) | 0})`;
 }
 
 /** ガイド線を描画する(画像座標系のコンテキストに対して) */
@@ -36,14 +100,34 @@ export function drawGuides(
   ctx: CanvasRenderingContext2D,
   guides: GuideLine[],
   settings: GuideSettings,
+  sampler: ColorSampler | null = null,
 ): void {
   ctx.save();
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
+  const finish = settings.style === 'finish';
+  const la = settings.lightAngle * D2R;
+  const light = { x: Math.cos(la), y: Math.sin(la) };
+
+  // 仕上げ: まず影シェイプ(光源の反対側)
+  if (finish && settings.showShadow) {
+    for (const g of guides) {
+      if (!settings.show[g.type] || g.pts.length < 3) continue;
+      const normals = pathNormals(g.pts);
+      let dot = 0;
+      for (const nn of normals) dot += nn.x * light.x + nn.y * light.y;
+      const side: 1 | -1 = dot > 0 ? -1 : 1;
+      ctx.fillStyle = shadowColorFrom(sampleMid(g, sampler));
+      ctx.globalAlpha = Math.max(0, Math.min(1, 0.55 * g.alpha * settings.opacity));
+      fillShadow(ctx, g, side);
+    }
+  }
+
+  // 線
   for (const g of guides) {
     if (!settings.show[g.type]) continue;
     if (g.pts.length < 2) continue;
-    const color = GUIDE_COLORS[g.type];
+    const color = finish ? lineColorFrom(sampleMid(g, sampler)) : GUIDE_COLORS[g.type];
     ctx.globalAlpha = Math.max(0, Math.min(1, g.alpha * settings.opacity));
     if (g.widths && g.widths.length === g.pts.length) {
       ctx.fillStyle = color;
@@ -65,6 +149,34 @@ export function drawGuides(
   }
   ctx.globalAlpha = 1;
   ctx.restore();
+}
+
+/** ベース画像から色サンプラーを作る(縮小コピーを1度だけ読む) */
+export function buildSampler(image: HTMLImageElement): ColorSampler | null {
+  const maxDim = 512;
+  const scale = Math.min(1, maxDim / Math.max(image.naturalWidth, image.naturalHeight));
+  const w = Math.max(1, Math.round(image.naturalWidth * scale));
+  const h = Math.max(1, Math.round(image.naturalHeight * scale));
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(image, 0, 0, w, h);
+  let data: Uint8ClampedArray;
+  try {
+    data = ctx.getImageData(0, 0, w, h).data;
+  } catch {
+    return null;
+  }
+  const sx = w / image.naturalWidth;
+  const sy = h / image.naturalHeight;
+  return (x: number, y: number) => {
+    const px = Math.round(x * sx);
+    const py = Math.round(y * sy);
+    if (px < 0 || py < 0 || px >= w || py >= h) return null;
+    const i = (py * w + px) * 4;
+    return [data[i], data[i + 1], data[i + 2], data[i + 3]];
+  };
 }
 
 /** 服の領域ポリゴンからマスクキャンバスを作る */
@@ -119,12 +231,13 @@ export function renderGuideLayer(
   guides: GuideLine[],
   settings: GuideSettings,
   mask: HTMLCanvasElement | HTMLImageElement | null,
+  sampler: ColorSampler | null = null,
 ): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = imgW;
   c.height = imgH;
   const ctx = c.getContext('2d')!;
-  drawGuides(ctx, guides, settings);
+  drawGuides(ctx, guides, settings, sampler);
   if (mask && settings.clip) {
     ctx.globalCompositeOperation = 'destination-in';
     ctx.drawImage(mask, 0, 0, imgW, imgH);

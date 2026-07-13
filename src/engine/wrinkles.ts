@@ -214,6 +214,7 @@ function tensionWrinkles(
     const sag = ctx.u * (2 + material.weight * 6) * (1 - Math.abs(off) * 0.5);
     const lenJitter = (rand() - 0.5) * 0.08;
 
+    const hook = (rand() > 0.5 ? 1 : -1) * ctx.u * (2 + rand() * 3);
     const pts: V3[] = [];
     for (let s = 0; s <= samples; s++) {
       const t = t0 + lenJitter + ((t1 - t0) * s) / samples;
@@ -221,6 +222,9 @@ function tensionWrinkles(
       let p = lerp(A, B, t);
       p = add(p, scale(perp, off * spread * (0.3 + 0.7 * bell)));
       p = add(p, scale(perp, Math.sin(t * 9 + jitterPhase) * jitterAmp * bell));
+      // 終端の抜きハネ(手描き風に少し曲げる)
+      const tt = s / samples;
+      if (tt > 0.8) p = add(p, scale(perp, hook * Math.pow((tt - 0.8) / 0.2, 2)));
       p.y += sag * bell;
       pts.push(p);
     }
@@ -399,13 +403,14 @@ function drapeWrinkles(
     const lenK = length * (0.7 + rand() * 0.45);
     const straighten = 1.5 + material.weight * 2;
 
+    const curl = (rand() - 0.5) * 0.25; // 裾の抜きハネ
     const pts: V3[] = [];
     const normals: V3[] = [];
     for (let t = 0; t <= samples; t++) {
       const tt = t / samples;
       const lateral =
         (maxPhi * (1 - Math.exp(-tt * straighten))) / (1 - Math.exp(-straighten));
-      const phi = cyl.phi0 + lateral;
+      const phi = cyl.phi0 + lateral + curl * tt * tt * tt;
       const yDrop = lenK * (tt * 0.3 + tt * tt * 0.7);
       const { p, n: nn } = cylPoint(cyl, phi, S.y + yDrop);
       pts.push(p);

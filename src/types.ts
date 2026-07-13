@@ -29,12 +29,20 @@ export type GuideType = 'tension' | 'compression' | 'pooling' | 'drape';
 
 export type Density = 'simple' | 'standard' | 'detailed';
 
+/** 表示スタイル: guide=色分けガイド線 / finish=仕上げ(ペン線+セル影) */
+export type GuideStyle = 'guide' | 'finish';
+
 export interface GuideSettings {
   show: Record<GuideType, boolean>;
   opacity: number; // 0..1
   density: Density;
   /** 服の領域(または画像の透明部分)でガイドをクリップする */
   clip: boolean;
+  style: GuideStyle;
+  /** 光の来る方向(度)。-90=真上, 0=右, 180/-180=左 */
+  lightAngle: number;
+  /** 仕上げスタイルで影シェイプを描くか */
+  showShadow: boolean;
 }
 
 export interface GuideLine {

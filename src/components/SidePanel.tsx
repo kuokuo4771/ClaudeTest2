@@ -275,6 +275,48 @@ export default function SidePanel(props: Props) {
       {/* ガイド表示 */}
       <div className="section">
         <h2>🎨 ガイド表示</h2>
+        <div className="row">
+          <label>スタイル</label>
+          <select
+            value={settings.style}
+            onChange={(e) =>
+              onSettingsChange({ ...settings, style: e.target.value as GuideSettings['style'] })
+            }
+          >
+            <option value="finish">仕上げ（線＋影）</option>
+            <option value="guide">ガイド（色分け）</option>
+          </select>
+        </div>
+        {settings.style === 'finish' && (
+          <>
+            <div className="row">
+              <label>光源方向</label>
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                step={5}
+                value={settings.lightAngle}
+                onChange={(e) => onSettingsChange({ ...settings, lightAngle: +e.target.value })}
+              />
+              <span className="value">{settings.lightAngle}°</span>
+            </div>
+            <label
+              style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 12 }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.showShadow}
+                onChange={(e) => onSettingsChange({ ...settings, showShadow: e.target.checked })}
+              />
+              シワの影シェイプを付ける
+            </label>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              線と影の色はベース画像の色から自動で作られます。
+              光源方向: -90°=真上 / 0°=右 / ±180°=左
+            </div>
+          </>
+        )}
         <div className="check-grid">
           {GUIDE_NAMES.map((g) => (
             <label key={g.type}>

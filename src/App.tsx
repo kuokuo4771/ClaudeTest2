@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CanvasView, { CanvasMode } from './components/CanvasView';
 import SidePanel from './components/SidePanel';
 import { generateGuides } from './engine/wrinkles';
-import { buildRegionMask, imageHasAlpha, renderGuideLayer } from './engine/draw';
+import {
+  buildRegionMask,
+  buildSampler,
+  imageHasAlpha,
+  renderGuideLayer,
+} from './engine/draw';
 import { createDemoImage } from './engine/demo';
 import { MATERIAL_PRESETS } from './types';
 import type {
@@ -34,9 +39,12 @@ export default function App() {
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [settings, setSettings] = useState<GuideSettings>({
     show: { tension: true, compression: true, pooling: true, drape: true },
-    opacity: 0.85,
+    opacity: 0.9,
     density: 'standard',
     clip: true,
+    style: 'finish',
+    lightAngle: -90,
+    showShadow: true,
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -159,11 +167,21 @@ export default function App() {
     return alphaMaskAvailable ? image : null;
   }, [image, regions, alphaMaskAvailable]);
 
+  // ---- 仕上げスタイル用の色サンプラー ----
+  const sampler = useMemo(() => (image ? buildSampler(image) : null), [image]);
+
   // ---- ガイドレイヤー(画像解像度で描画+クリップ済み) ----
   const guideLayer = useMemo(() => {
     if (!image) return null;
-    return renderGuideLayer(image.naturalWidth, image.naturalHeight, guides, settings, mask);
-  }, [image, guides, settings, mask]);
+    return renderGuideLayer(
+      image.naturalWidth,
+      image.naturalHeight,
+      guides,
+      settings,
+      mask,
+      sampler,
+    );
+  }, [image, guides, settings, mask, sampler]);
 
   // ---- 画像読み込み ----
   const resetProject = useCallback((img: HTMLImageElement) => {
@@ -252,7 +270,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>
-          Wrinkle Guide<span>シワ描画補助ツール v0.3</span>
+          Wrinkle Guide<span>シワ描画補助ツール v0.4</span>
         </h1>
         <button className="primary" onClick={() => fileInputRef.current?.click()}>
           📂 画像読込
